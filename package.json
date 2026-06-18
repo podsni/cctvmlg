@@ -1,0 +1,49 @@
+{
+  "name": "cctvmlg",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "//": "=== Quality Gates ===",
+    "typecheck": "tsgo -p tsconfig.json",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint . --fix",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "//2": "=== Bundled Checks ===",
+    "check:fast": "bun run lint && bun run fmt:check",
+    "check": "bun run typecheck && bun run lint && bun run fmt:check",
+    "//3": "=== Convenience ===",
+    "fix": "bun run lint:fix && bun run fmt",
+    "//4": "=== cctvMlg build & deploy ===",
+    "build": "bun run src/index.ts",
+    "build:client": "bun run src/index.ts",
+    "dev": "wrangler pages dev --port 8789 --compatibility-date=2026-06-18",
+    "deploy": "bun run build && node scripts/deploy.mjs pages deploy dist --project-name=cctvmlg --branch=main --commit-dirty=true",
+    "deploy:dry": "bun run build && node scripts/deploy.mjs pages deploy dist --project-name=cctvmlg --dry-run",
+    "scrape": "node scripts/scrape.mjs",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "hono": "^4.12.26",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260617.1",
+    "@nkzw/oxlint-config": "^1.0.1",
+    "@types/bun": "latest",
+    "@typescript/native-preview": "^7.0.0-dev.20260218.1",
+    "cloakbrowser": "^0.3.31",
+    "oxfmt": "^0.33.0",
+    "oxlint": "^1.48.0",
+    "playwright": "^1.55.0",
+    "wrangler": "^4.101.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
