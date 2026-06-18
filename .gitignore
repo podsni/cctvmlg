@@ -6,3 +6,11 @@ dist/
 data/page.png
 .env
 .env.local
+node_modules/
+.wrangler/
+dist/
+.DS_Store
+*.log
+data/page.png
+.env
+.env.local

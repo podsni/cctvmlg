@@ -14,8 +14,9 @@
  * from the same origin (this Worker).
  */
 import { Hono } from "hono";
-import { loadCameras } from "./api";
+import { getCameras } from "./api";
 import { renderApp } from "./ssr";
+import { bakedCookieHeader } from "./_data_cookies";
 
 export interface AppEnv {
   /** Static asset binding (Pages [assets]) — unused for now but kept for parity. */
@@ -32,15 +33,30 @@ const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/** Common headers we send to the upstream CCTV server. */
-function upstreamHeaders(): Record<string, string> {
+/** Common headers we send to the upstream CCTV server. Mimics a real
+ *  Chrome browser closely enough that the upstream's WAF lets us through
+ *  when combined with valid session cookies. */
+function upstreamHeaders(cookies: string): Record<string, string> {
   return {
     Referer: UPSTREAM_REFERER,
     Origin: UPSTREAM_ORIGIN,
     Accept: "*/*",
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    Cookie: cookies,
     "User-Agent": UA,
   };
 }
+
+/** Returns the baked-in session cookie header captured by `bun run scrape`.
+ *  Returns empty string if not yet scraped — stream endpoints will fail
+ *  with 503 until the deploy is refreshed. */
+const bakedCookies: string = bakedCookieHeader ?? "";
 
 /** CORS for /api/* (allow any origin). We proxy segments so this is safe. */
 function corsHeaders(): Record<string, string> {
@@ -59,6 +75,67 @@ function edgeInit(headers: Record<string, string>): RequestInit {
   } as unknown as RequestInit;
 }
 
+/**
+ * The CCTV upstream requires session cookies that are only set after the
+ * browser visits the landing page. We mirror that visit once per edge
+ * region and stash the cookies in the CF Cache API, then reuse them for
+ * subsequent stream + segment fetches. Without this, every request 403s.
+ */
+async function getSessionCookieHeader(): Promise<string> {
+  const cache = caches as unknown as {
+    default: {
+      match: (req: Request | string) => Promise<Response | undefined>;
+      put: (req: Request, resp: Response) => Promise<void>;
+    };
+  };
+  const cacheKey = new Request(
+    "https://internal.cctvmlg.local/session-cookies",
+  );
+  const cached = await cache.default.match(cacheKey);
+  if (cached) {
+    return await cached.text();
+  }
+
+  // Fetch the landing page to acquire session cookies. The landing page
+  // itself is cached at edge so this is one upstream round-trip per
+  // region per cache TTL.
+  const landingResp = await fetch(UPSTREAM_BASE + "/sebaran-cctv", {
+    headers: {
+      Referer: UPSTREAM_REFERER,
+      Origin: UPSTREAM_ORIGIN,
+      Accept: "text/html",
+      "User-Agent": UA,
+    },
+    cf: { cacheTtl: 1800, cacheEverything: true },
+  } as unknown as RequestInit);
+
+  if (!landingResp.ok) {
+    throw new Error(`Landing fetch failed: ${landingResp.status}`);
+  }
+
+  // Extract cookie pairs from the response Set-Cookie headers. We send
+  // Extract cookie pairs from the Set-Cookie response. Some Workers
+  // runtimes don't expose Headers.getSetCookie(), so fall back to the
+  // raw combined header (it's a single comma-delimited string there).
+  const headersAny = landingResp.headers as unknown as {
+    getSetCookie?: () => string[];
+  };
+  const rawSetCookie = landingResp.headers.get("set-cookie") ?? "";
+  const combined = headersAny.getSetCookie?.() ?? [];
+  const cookies =
+    combined.length > 0 ? combined : rawSetCookie.split(/,(?=[^;]+=)/);
+  const cookiePairs = cookies
+    .map((sc) => sc.split(";")[0]?.trim() ?? "")
+    .filter((c) => c.length > 0);
+
+  const cookieHeader = cookiePairs.join("; ");
+  const response = new Response(cookieHeader, {
+    headers: { "cache-control": "max-age=1800" },
+  });
+  await cache.default.put(cacheKey, response);
+  return cookieHeader;
+}
+
 // ---------------------------------------------------------------------------
 // API routes
 // ---------------------------------------------------------------------------
@@ -71,9 +148,44 @@ app.get("/api/health", (c) =>
   }),
 );
 
-app.get("/api/cameras", async (c) => {
+app.get("/api/debug/upstream-test", async (c) => {
+  const streamId = c.req.param("id") ?? "637253114452609264665590";
+  if (!/^\d{15,30}$/.test(streamId)) {
+    return c.json({ ok: false, error: "bad stream id" }, 400);
+  }
+  const headers = upstreamHeaders(bakedCookies);
   try {
-    const cameras = await loadCameras();
+    const resp = await fetch(
+      `${UPSTREAM_BASE}/cctv-stream/streams/${streamId}.m3u8`,
+      {
+        headers,
+        cf: { cacheTtl: 0, cacheEverything: false },
+      } as unknown as RequestInit,
+    );
+    const text = await resp.text();
+    return c.json({
+      ok: resp.ok,
+      status: resp.status,
+      cookiesBaked: bakedCookies ? `${bakedCookies.length} chars` : "EMPTY",
+      headersSent: headers,
+      upstreamResponsePreview: text.slice(0, 300),
+      upstreamResponseHeaders: {
+        contentType: resp.headers.get("content-type"),
+        server: resp.headers.get("server"),
+        cfRay: resp.headers.get("cf-ray"),
+      },
+    });
+  } catch (err) {
+    return c.json(
+      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      500,
+    );
+  }
+});
+
+app.get("/api/cameras", (c) => {
+  try {
+    const cameras = getCameras();
     return c.json(
       {
         ok: true as const,
@@ -116,8 +228,22 @@ app.get("/api/stream/:id", async (c) => {
   }
 
   const upstreamUrl = `${UPSTREAM_BASE}/cctv-stream/streams/${streamId}.m3u8`;
+  if (!bakedCookies) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          "Worker has no baked cookies — run `bun run scrape && bun run build && bun run deploy` first.",
+      },
+      503,
+      corsHeaders(),
+    );
+  }
   try {
-    const resp = await fetch(upstreamUrl, edgeInit(upstreamHeaders()));
+    const resp = await fetch(
+      upstreamUrl,
+      edgeInit(upstreamHeaders(bakedCookies)),
+    );
 
     if (!resp.ok) {
       return c.json(
@@ -166,8 +292,14 @@ app.get("/api/segment/:id/:seq", async (c) => {
   }
 
   const upstreamUrl = `${UPSTREAM_BASE}/cctv-stream/streams/${streamId}_0p${seq}.ts`;
+  if (!bakedCookies) {
+    return c.text("Worker has no baked cookies — refresh the deploy.", 503);
+  }
   try {
-    const resp = await fetch(upstreamUrl, edgeInit(upstreamHeaders()));
+    const resp = await fetch(
+      upstreamUrl,
+      edgeInit(upstreamHeaders(bakedCookies)),
+    );
 
     if (!resp.ok) {
       return c.text(`Upstream ${resp.status}`, resp.status as 502);
@@ -193,11 +325,11 @@ app.get("/api/segment/:id/:seq", async (c) => {
 // SSR home — Pages serves this for /, everything else goes to /api/* above.
 // ---------------------------------------------------------------------------
 
-app.get("/", async (c) => {
-  let cameras: Awaited<ReturnType<typeof loadCameras>> = [];
+app.get("/", (c) => {
+  let cameras: ReturnType<typeof getCameras> = [];
   let upstreamError: string | null = null;
   try {
-    cameras = await loadCameras();
+    cameras = getCameras();
   } catch (err) {
     upstreamError = err instanceof Error ? err.message : String(err);
   }

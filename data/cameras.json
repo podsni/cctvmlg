@@ -1,5 +1,5 @@
 {
-  "scrapedAt": "2026-06-18T12:31:10.273Z",
+  "scrapedAt": "2026-06-18T13:22:15.861Z",
   "totalCameras": 253,
   "byKecamatan": {
     "1": [
@@ -5580,6 +5580,5 @@
       "status": "1",
       "nama_kecamatan": "LOWOKWARU"
     }
-  ],
-  "domStreamLinks": ["https://cctv.malangkota.go.id/sebaran-cctv#"]
+  ]
 }

@@ -48,8 +48,16 @@ function pushRecent(e: RecentEntry): void {
 }
 
 function streamUrl(c: Camera): string {
-  // Goes through our Worker's proxy which sets Referer upstream.
+  // Best-effort proxy through our Worker. Upstream CCTV uses a WAF that
+  // sometimes rejects requests from CF Worker IPs (JA fingerprinting),
+  // in which case the stream will 403. The UI offers an "Open source"
+  // button as a fallback that hits the upstream directly from the
+  // user's browser (which has proper cookies after visiting the site).
   return `/api/stream/${c.stream_id}`;
+}
+
+function sourceUrl(c: Camera): string {
+  return `https://cctv.malangkota.go.id/cctv-stream/streams/${c.stream_id}.m3u8`;
 }
 
 const App = ({ initialCameras, upstreamError, isServer }: AppProps) => {
@@ -526,7 +534,7 @@ const StreamPlayer = React.memo(
               </p>
             </div>
           </div>
-          <div className="player-card-actions">
+          <span className="player-card-actions">
             <button
               type="button"
               className="player-card-iconbtn"
@@ -534,8 +542,46 @@ const StreamPlayer = React.memo(
               aria-label={muted ? "Unmute" : "Mute"}
               title={muted ? "Unmute" : "Mute"}
             >
-              {muted ? "🔇" : "🔊"}
+              {muted ? (
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    d="M5 9v6h4l5 4V5L9 9H5z M17 9l4 6 M21 9l-4 6"
+                  />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    d="M5 9v6h4l5 4V5L9 9H5z M16 8a5 5 0 010 8 M19 5a9 9 0 010 14"
+                  />
+                </svg>
+              )}
             </button>
+            <a
+              href={sourceUrl(camera)}
+              target="_blank"
+              rel="noreferrer"
+              className="player-card-iconbtn"
+              aria-label="Buka sumber stream"
+              title="Buka sumber stream"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  d="M14 4h6v6 M20 4l-8 8 M19 13v6a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h6"
+                />
+              </svg>
+            </a>
             <button
               type="button"
               className="player-card-iconbtn"
@@ -545,7 +591,7 @@ const StreamPlayer = React.memo(
             >
               ×
             </button>
-          </div>
+          </span>
         </header>
         <div className="player-card-frame">
           <video
